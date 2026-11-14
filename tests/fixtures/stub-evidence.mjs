@@ -3,10 +3,25 @@
 //
 // Shape is NOT invented: `voyager/api.py::evidence_verify` returns
 // `evidence.verify(...)` verbatim as `{id, result}`, and `verify()` builds the
-// dict whose keys are status / exit_code / session_id / seq / digest /
-// found_digest / source_available / message (plus a few extra keys for found
-// sessions). The CLI prints the same dict minus `session`. The scenario file
-// simply carries that dict, so the fixture cannot quietly drift from the Core.
+// result dict. The PUBLISHED Core v1.5.0 `evidence.py::verify()` returns a
+// 12-field dict for a found session (captured live from the released wheel on
+// 2026-11-14, see reports/c1-phase2-execution.md):
+//
+//   digest, exit_code, found_digest, found_kind, found_summary, message,
+//   seq, session, session_id, source_available, source_stat, status
+//
+// The base 8 fields are always present (status / exit_code / session_id / seq /
+// digest / found_digest / source_available / message). The four extra fields
+// `found_kind`, `found_summary`, `session`, `source_stat` are added only on the
+// branches that reach a found event (MATCH / MISMATCH; UNVERIFIABLE adds
+// `session` + `source_stat` but not the two `found_*` keys; NOT_FOUND and
+// INVALID_REFERENCE return early with the base 8). `session` is the full session
+// row, `source_stat` a nested 8-key stat dict, `found_summary` a one-line
+// "<kind>: <body>" string.
+//
+// The scenario file carries exactly the dict the test wants the Core to answer,
+// so the fixture cannot quietly drift from the Core: tests/evidence-verify.test.ts
+// builds scenarios from the real 12-field shape (see `REAL_MATCH` there).
 //
 // Every spawn — including the `integration-info` discovery probe — appends a
 // line to SESSIONFLOW_EVIDENCE_RECORD. That is what lets a test prove a bad

@@ -31,15 +31,57 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const STUB = join(HERE, 'fixtures', 'stub-evidence.mjs');
 
 /**
- * Build the dict `voyager/evidence.py::verify()` actually returns. Keys and
- * types are copied from that function's `result` initialiser and its branches;
- * `status`/`exit_code` come from `EXIT_CODES` there. Nothing is re-derived here.
+ * The 12 keys a real `MATCH` verdict carries. Captured LIVE from the PUBLISHED
+ * Core v1.5.0 wheel on 2026-11-14 (seeded `codex:s1`, `api.evidence_verify`),
+ * not guessed: `reports/c1-phase2-execution.md` records the exact JSON.
+ */
+const REAL_MATCH_KEYS = [
+  'digest', 'exit_code', 'found_digest', 'found_kind', 'found_summary',
+  'message', 'seq', 'session', 'session_id', 'source_available',
+  'source_stat', 'status',
+];
+
+/** The 8 keys of the nested `source_stat` dict (published v1.5.0 `_source_stat`). */
+const REAL_SOURCE_STAT_KEYS = [
+  'current_mtime', 'current_size', 'exists', 'mtime_matches', 'path',
+  'recorded_mtime', 'recorded_size', 'size_matches',
+];
+
+/** A full real-Core session row (keys/types from the published wheel's `session`). */
+const REAL_SESSION = {
+  id: 'codex:s1', provider: 'codex', native_id: 's1', title: 'c1 real shape',
+  started_at: 1000.0, updated_at: 2000.0, cwd: 'E:/proj/demo',
+  repo_root: 'E:/proj/demo', git_remote: null, git_branch: null,
+  git_commit: null, model: null, message_count: 1, tool_count: 0,
+  can_resume: 1, can_fork: 0, resume_cmd: 'codex resume s1',
+  metadata_json: '{}', raw_metadata_json: '{}',
+  source_state: 'ACTIVE_SOURCE', source_missing_since: null,
+};
+
+/** A real `source_stat` (values are a representative captured sample). */
+const REAL_SOURCE_STAT = {
+  recorded_mtime: 1794667932.6553776, recorded_size: 2,
+  current_mtime: 1794667932.6553776, current_size: 2,
+  path: 'E:/proj/demo/s.jsonl', exists: true,
+  mtime_matches: true, size_matches: true,
+};
+
+/**
+ * Build the dict `voyager/evidence.py::verify()` actually returns, with the
+ * REAL branch-dependent key sets from the published v1.5.0 core (NOT the old
+ * 8-key subset):
+ *   - MATCH / MISMATCH  -> 12 keys (base 8 + session, source_stat,
+ *                         found_kind, found_summary)
+ *   - UNVERIFIABLE      -> 10 keys (base 8 + session, source_stat)
+ *   - NOT_FOUND / INVALID_REFERENCE -> base 8 only (early return)
+ * Keys/types are copied from that function's `result` initialiser and branches;
+ * `status`/`exit_code` come from `EXIT_CODES`. No field is invented.
  */
 function verdict(status: string, over: Record<string, unknown> = {}) {
   const exitCode: Record<string, number> = {
     MATCH: 0, MISMATCH: 1, NOT_FOUND: 2, UNVERIFIABLE: 3, INVALID_REFERENCE: 4,
   };
-  return {
+  const base: Record<string, unknown> = {
     status,
     exit_code: exitCode[status],
     session_id: 'codex:m',
@@ -48,8 +90,17 @@ function verdict(status: string, over: Record<string, unknown> = {}) {
     found_digest: 'c71c180a',
     source_available: true,
     message: 'the event at seq 3 is the one the reference named',
-    ...over,
   };
+  if (status === 'MATCH' || status === 'MISMATCH') {
+    base['session'] = REAL_SESSION;
+    base['source_stat'] = REAL_SOURCE_STAT;
+    base['found_kind'] = 'user';
+    base['found_summary'] = 'user: fix the evaluation pipeline';
+  } else if (status === 'UNVERIFIABLE') {
+    base['session'] = REAL_SESSION;
+    base['source_stat'] = REAL_SOURCE_STAT;
+  }
+  return { ...base, ...over };
 }
 
 /** Run one tool call against the stub; return { calls, value, error }. */
@@ -106,6 +157,55 @@ test('all five verdicts are returned verbatim, BY NAME', async () => {
     assert.deepEqual(value, scenario,
       `${status}: the whole Core dict must be passed through unchanged`);
     assert.equal((value as { status: string }).status, status);
+  }
+});
+
+// Finding C: assert the FULL real-Core 12-field response shape, not the old
+// 8-key subset. If the published Core drops or renames any of the four extra
+// keys on a found session, this goes RED — that is the point.
+test('a MATCH verdict carries the full real-Core 12-key shape', async () => {
+  const scenario = verdict('MATCH');
+  const { value } = await runEvidence(scenario, GOOD);
+  assert.deepEqual(Object.keys(value as object).sort(), [...REAL_MATCH_KEYS].sort(),
+    'the 12 keys must match the published v1.5.0 wheel exactly');
+  const v = value as {
+    session: Record<string, unknown>; source_stat: Record<string, unknown>;
+    found_kind: unknown; found_summary: unknown;
+  };
+  assert.deepEqual(Object.keys(v.session).sort(),
+    Object.keys(REAL_SESSION).sort(), 'session is the full session row');
+  assert.deepEqual(Object.keys(v.source_stat).sort(),
+    [...REAL_SOURCE_STAT_KEYS].sort(), 'source_stat keeps its nested 8 keys');
+  assert.equal(v.found_kind, 'user');
+  assert.match(String(v.found_summary), /^user: /,
+    'found_summary is a one-line "<kind>: <body>" summary');
+});
+
+test('a MISMATCH verdict also carries the full 12-key shape', async () => {
+  const scenario = verdict('MISMATCH', { digest: '00000000' });
+  const { value } = await runEvidence(scenario, GOOD);
+  assert.deepEqual(Object.keys(value as object).sort(), [...REAL_MATCH_KEYS].sort());
+});
+
+test('UNVERIFIABLE keeps session + source_stat but no found_* keys (10 keys)', async () => {
+  const scenario = verdict('UNVERIFIABLE', { digest: null });
+  const { value } = await runEvidence(scenario, GOOD);
+  const keys = Object.keys(value as object).sort();
+  assert.deepEqual(keys,
+    [...REAL_MATCH_KEYS].filter((k) => k !== 'found_kind' && k !== 'found_summary').sort(),
+    'the no-digest branch adds session/source_stat but not found_*');
+});
+
+test('NOT_FOUND and INVALID_REFERENCE return early with the base 8 keys', async () => {
+  for (const status of ['NOT_FOUND', 'INVALID_REFERENCE']) {
+    const scenario = verdict(status, { digest: null, found_digest: null,
+      source_available: null });
+    const { value } = await runEvidence(scenario, GOOD);
+    const keys = Object.keys(value as object).sort();
+    assert.deepEqual(keys,
+      [...REAL_MATCH_KEYS].filter((k) => !['session', 'source_stat',
+        'found_kind', 'found_summary'].includes(k)).sort(),
+      `${status}: early return keeps only the base 8`);
   }
 });
 
